@@ -91,15 +91,33 @@ async def websocket_endpoint(websocket: WebSocket):
                 
             # Process the frame
             timestamp_ms = int((time.time() - start_time) * 1000)
-            pose_landmarks, annotated_frame = estimator.process_frame(frame, timestamp_ms)
+            pose_landmarks, annotated_frame, feedback_data = estimator.process_frame(frame, timestamp_ms)
             
-            # Encode annotated frame back to base64 to send it back
-            _, buffer = cv2.imencode('.jpg', annotated_frame)
-            b64_img = base64.b64encode(buffer).decode('utf-8')
+            # Extract the 33 body landmarks
+            landmarks_list = []
+            if pose_landmarks and len(pose_landmarks) > 0:
+                # pose_landmarks[0] contains the landmarks for the first detected person
+                for lm in pose_landmarks[0]:
+                    landmarks_list.append({
+                        "x": lm.x,
+                        "y": lm.y,
+                        "z": lm.z,
+                        "visibility": getattr(lm, "visibility", 0.0)
+                    })
             
-            # Send back annotated image! 
-            # In the future, you could also send raw skeletal data here for frontend analytics
-            await websocket.send_json({"image": "data:image/jpeg;base64," + b64_img})
+            # Prepare fast JSON response
+            response_data = {
+                "reps": feedback_data.get("counter", 0) if feedback_data else 0,
+                "feedback": feedback_data.get("feedback", "POSITIONING...") if feedback_data else "WAITING...",
+                "stage": feedback_data.get("stage", "") if feedback_data else "",
+                "score": 95 if feedback_data and "Good" in feedback_data.get("feedback", "") else 70,
+                "good_form": feedback_data and "WARNING" not in feedback_data.get("feedback", "") if feedback_data else False,
+                "aligned": len(landmarks_list) > 0,
+                "landmarks": landmarks_list  # <--- Sending 33 points instead of a large image!
+            }
+            
+            # Send back the tiny, fast JSON packet
+            await websocket.send_json(response_data)
             
     except WebSocketDisconnect:
         print("Frontend disconnected from live feed.")

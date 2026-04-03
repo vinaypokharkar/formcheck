@@ -59,20 +59,21 @@ class PoseEstimator:
         
         # Detect pose
         detection_result = self.landmarker.detect_for_video(mp_image, timestamp_ms)
+        pose_landmarks = detection_result.pose_landmarks
         
         annotated_image = image.copy()
         
+        # Evaluate the exercise!
+        feedback_data = self.checker.process(pose_landmarks[0]) if pose_landmarks else None
+        
         # Draw the pose landmarks on the image copy
-        if hasattr(detection_result, 'pose_landmarks') and detection_result.pose_landmarks:
-            for pose_landmarks in detection_result.pose_landmarks:
+        if pose_landmarks:
+            for pose_landmarks_item in pose_landmarks:
                 h, w, _ = annotated_image.shape
                 
                 # Convert normalized coordinates to pixel coordinates
-                # Use a dictionary to store valid landmarks to enforce a hardware visibility threshold
                 pixel_landmarks = {}
-                for idx, lm in enumerate(pose_landmarks): # lm has x, y, z, visibility, presence
-                    # MediaPipe guesses the position of invisible joints (e.g. feet off-screen). 
-                    # If visibility is less than a certain threshold, it usually creates inaccurate lines.
+                for idx, lm in enumerate(pose_landmarks_item): # lm has x, y, z, visibility, presence
                     if getattr(lm, 'visibility', 1.0) < 0.5:
                         continue
                         
@@ -91,35 +92,24 @@ class PoseEstimator:
                                  pixel_landmarks[end_idx], 
                                  (255, 0, 0), 2)
                                  
-                # Evaluate the exercise!
-                feedback_data = self.checker.process(pose_landmarks)
-                
-                if feedback_data:
-                    # Draw Replay Counter and Feedback on Screen
-                    cv2.rectangle(annotated_image, (0, 0), (450, 100), (0, 0, 0), -1)
-                    
-                    # Display count
-                    cv2.putText(annotated_image, f"REPS: {feedback_data['counter']}", 
-                                (10, 40), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2, cv2.LINE_AA)
-                                
-                    # Display stage
-                    cv2.putText(annotated_image, f"STAGE: {feedback_data['stage']}", 
-                                (200, 40), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2, cv2.LINE_AA)
-                                
-                    # Display form feedback with dynamic coloring!
-                    text_color = feedback_data.get('color', (0, 255, 255))
-                    cv2.putText(annotated_image, f"FEEDBACK: {feedback_data['feedback']}", 
-                                (10, 80), cv2.FONT_HERSHEY_SIMPLEX, 0.8, text_color, 2, cv2.LINE_AA)
-                                
-                    # Optionally draw the exact angle right next to the active joint
-                    if feedback_data.get('draw_coords') and feedback_data['angle'] > 0:
-                        ex, ey = feedback_data['draw_coords']
-                        # Convert normalized back to pixel to draw text
-                        px, py = int(ex * w), int(ey * h)
-                        cv2.putText(annotated_image, str(feedback_data['angle']), 
-                                    (px + 15, py), cv2.FONT_HERSHEY_SIMPLEX, 0.7, text_color, 2, cv2.LINE_AA)
+        if feedback_data:
+            # Draw Replay Counter and Feedback on Screen
+            cv2.rectangle(annotated_image, (0, 0), (450, 100), (0, 0, 0), -1)
+            
+            # Display count
+            cv2.putText(annotated_image, f"REPS: {feedback_data['counter']}", 
+                        (10, 40), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2, cv2.LINE_AA)
+                        
+            # Display stage
+            cv2.putText(annotated_image, f"STAGE: {feedback_data['stage']}", 
+                        (200, 40), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2, cv2.LINE_AA)
+                        
+            # Display form feedback with dynamic coloring!
+            text_color = feedback_data.get('color', (0, 255, 255))
+            cv2.putText(annotated_image, f"FEEDBACK: {feedback_data['feedback']}", 
+                        (10, 80), cv2.FONT_HERSHEY_SIMPLEX, 0.8, text_color, 2, cv2.LINE_AA)
                                     
-        return detection_result.pose_landmarks, annotated_image
+        return detection_result.pose_landmarks, annotated_image, feedback_data
 
     def close(self):
         """Required clean up for MediaPipe resources."""

@@ -20,6 +20,12 @@ export function OnboardingActions() {
         style={styles.btnPrimary}
       />
       <Button 
+        title="Demo Live Feed" 
+        variant="secondary" 
+        onPress={() => router.push('/live-session')} 
+        style={styles.btnSecondary}
+      />
+      <Button 
         title="Existing User" 
         variant="secondary" 
         onPress={() => router.push('/sign-in')} 

@@ -1,28 +1,188 @@
 import React, { useState, useEffect } from 'react';
-import { View, StyleSheet, TouchableOpacity, Pressable, StatusBar } from 'react-native';
+import { View, StyleSheet, Pressable, StatusBar, Animated, Easing, Dimensions } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { CameraView, useCameraPermissions } from 'expo-camera';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
+
+// MediaPipe Pose Connections (indexes of body parts to connect)
+const POSE_CONNECTIONS = [
+  [11, 12], [11, 13], [13, 15], [12, 14], [14, 16], // Arms
+  [11, 23], [12, 24], [23, 24], // Torso
+  [23, 25], [24, 26], [25, 27], [26, 28] // Legs
+];
+
+interface Landmark {
+  x: number;
+  y: number;
+  z: number;
+  visibility: number;
+}
 import { Theme } from '@/constants/theme';
 import { Typography } from '@/components/ui/Typography';
 import { useRouter } from 'expo-router';
-import { BlurView } from 'expo-blur';
+
+const { width: SCREEN_WIDTH } = Dimensions.get('window');
+
+// Color palette
+const COLORS = {
+  // Monochrome base
+  surface: '#080808',
+  surfaceElevated: '#121214',
+  surfaceHigh: '#1a1a1d',
+  border: '#232323',
+  borderHigh: '#2d2d2d',
+  text: '#eaeaea',
+  textMuted: '#78787a',
+  textDisabled: '#444444',
+  white: '#f5f5f5',
+
+  // Performance indicators
+  success: '#16c851',
+  successDim: 'rgba(22, 200, 81, 0.12)',
+  successBorder: 'rgba(22, 200, 81, 0.25)',
+
+  warning: '#e2b815',
+  warningDim: 'rgba(226, 184, 21, 0.12)',
+  warningBorder: 'rgba(226, 184, 21, 0.25)',
+
+  error: '#e62424',
+  errorDim: 'rgba(230, 36, 36, 0.12)',
+  errorBorder: 'rgba(230, 36, 36, 0.25)',
+
+  live: '#e62424',
+  liveDim: 'rgba(230, 36, 36, 0.15)',
+};
 
 export default function LiveSessionScreen() {
   const router = useRouter();
   const [permission, requestPermission] = useCameraPermissions();
   const [facing, setFacing] = useState<'back' | 'front'>('back');
   const [isPaused, setIsPaused] = useState(false);
+  const cameraRef = React.useRef<any>(null);
 
-  // Re-check permission just in case, though it should be handled by the previous screen
-  if (!permission) {
-    return <View />;
-  }
+  // LIVE DATA STATE
+  const [reps, setReps] = useState(0);
+  const [formScore, setFormScore] = useState(0);
+  const [feedback, setFeedback] = useState('POSITIONING...');
+  const [isGoodForm, setIsGoodForm] = useState(true);
+  const [isAligned, setIsAligned] = useState(false);
+  const [landmarks, setLandmarks] = useState<Landmark[]>([]);
 
+  // Animation values
+  const [scoreAnimation] = useState(new Animated.Value(1));
+  const [repsAnimation] = useState(new Animated.Value(1));
+  const prevScore = React.useRef(formScore);
+  const prevReps = React.useRef(reps);
+
+  useEffect(() => {
+    if (formScore !== prevScore.current) {
+      prevScore.current = formScore;
+      Animated.sequence([
+        Animated.timing(scoreAnimation, {
+          toValue: 1.08,
+          duration: 120,
+          useNativeDriver: true,
+          easing: Easing.out(Easing.cubic),
+        }),
+        Animated.timing(scoreAnimation, {
+          toValue: 1,
+          duration: 200,
+          useNativeDriver: true,
+          easing: Easing.out(Easing.cubic),
+        }),
+      ]).start();
+    }
+
+    if (reps !== prevReps.current) {
+      prevReps.current = reps;
+      Animated.sequence([
+        Animated.timing(repsAnimation, {
+          toValue: 0.95,
+          duration: 100,
+          useNativeDriver: true,
+          easing: Easing.out(Easing.cubic),
+        }),
+        Animated.timing(repsAnimation, {
+          toValue: 1,
+          duration: 300,
+          useNativeDriver: true,
+          easing: Easing.out(Easing.cubic),
+        }),
+      ]).start();
+    }
+  }, [formScore, reps]);
+
+  // WEBSOCKET LOGIC
+  const WS_URL = 'https://three-pants-wash.loca.lt/ws/live-feed';
+
+  useEffect(() => {
+    let ws: WebSocket | null = null;
+    let frameInterval: any = null;
+
+    if (!isPaused && permission?.granted) {
+      ws = new WebSocket(WS_URL);
+
+      ws.onopen = () => {
+        console.log('Connected to FormCheck Live Feed');
+
+        // Start frame capture loop
+        frameInterval = setInterval(async () => {
+          if (cameraRef.current && ws?.readyState === WebSocket.OPEN) {
+            try {
+              const photo = await cameraRef.current.takePictureAsync({
+                base64: true,
+                quality: 0.1,
+                scale: 0.4,
+                shutterSound: false,
+                skipProcessing: true,
+              });
+              if (photo.base64) {
+                ws.send(photo.base64);
+              }
+            } catch (err) {
+               // Silently fail if camera is busy
+            }
+          }
+        }, 150);
+      };
+
+      ws.onmessage = (e) => {
+        try {
+          const data = JSON.parse(e.data);
+          if (data.reps !== undefined) setReps(data.reps);
+          if (data.score !== undefined) setFormScore(data.score);
+          if (data.feedback !== undefined) setFeedback(data.feedback);
+          if (data.landmarks !== undefined) setLandmarks(data.landmarks);
+
+          // Use feedback to determine status UI
+          setIsGoodForm(data.good_form ?? true);
+          setIsAligned(data.aligned ?? false);
+        } catch (err) {
+          console.error('WS Message Error:', err);
+        }
+      };
+
+      ws.onerror = (e: any) => {
+        console.log('WS Error:', e.message || 'Connection failed');
+      };
+
+      ws.onclose = () => {
+        console.log('Disconnected from Live Feed');
+      };
+    }
+
+    return () => {
+      if (ws) ws.close();
+      if (frameInterval) clearInterval(frameInterval);
+    };
+  }, [isPaused, permission?.granted]);
+
+  // Re-check permission just in case
+  if (!permission) return <View />;
   if (!permission.granted) {
     return (
       <View style={styles.container}>
-        <Typography variant="titleMd" style={{ color: '#FFF', textAlign: 'center' }}>
+        <Typography variant="titleMd" style={{ color: COLORS.white, textAlign: 'center' }}>
           Camera access is required for live tracking.
         </Typography>
       </View>
@@ -33,356 +193,495 @@ export default function LiveSessionScreen() {
     setFacing(current => (current === 'back' ? 'front' : 'back'));
   };
 
+  // Helper function to get form score color
+  const getScoreColor = (score: number) => {
+    if (score >= 80) return COLORS.success;
+    if (score >= 50) return COLORS.warning;
+    return COLORS.error;
+  };
+
+  // Get feedback color
+  const getFeedbackColor = () => {
+    if (!isGoodForm) return 'error';
+    return 'success';
+  };
+
   return (
     <View style={styles.container}>
       <StatusBar barStyle="light-content" translucent />
-      
+
       {/* CAMERA VIEW */}
-      <CameraView style={styles.camera} facing={facing}>
-        <SafeAreaView style={styles.overlay} edges={['top']}>
-          {/* TOP NAV BLUR (Optional based on design) */}
-          <View style={styles.header}>
-            <View style={styles.headerLeft}>
-               <View style={styles.menuIcon}>
-                 <MaterialCommunityIcons name="menu" size={24} color="#FFF" />
-               </View>
-               <Typography variant="headlineLg" style={styles.logo}>FormCheck</Typography>
-            </View>
-            <View style={styles.headerRight}>
-               <View style={styles.liveBadge}>
-                 <View style={styles.liveDot} />
-                 <Typography variant="labelSm" style={{ color: '#FFF', fontWeight: '700' }}>LIVE</Typography>
-               </View>
-               <Pressable style={styles.plusBtn}>
-                 <MaterialCommunityIcons name="plus" size={24} color="#FFF" />
-               </Pressable>
-            </View>
-          </View>
+      <CameraView style={styles.camera} facing={facing} ref={cameraRef} />
 
-          {/* EXERCISE INFO */}
-          <View style={styles.topInfoRow}>
-            <View style={styles.exerciseInfoContainer}>
-              <Typography variant="labelSm" style={styles.labelSmall}>CURRENT EXERCISE</Typography>
-              <Typography variant="headlineLg" style={styles.exerciseName}>Dumbbell Press</Typography>
-              <View style={styles.timeBadge}>
-                <Typography variant="labelSm" style={styles.timeLabel}>TIME</Typography>
-                <Typography variant="labelSm" style={styles.timeValue}>04:12</Typography>
-              </View>
-            </View>
+      {/* SKELETON OVERLAY */}
+      {landmarks.length > 0 && (
+        <View style={StyleSheet.absoluteFill} pointerEvents="none">
+          {/* Draw Joints */}
+          {landmarks.map((lm, i) => {
+            if (lm.visibility < 0.6 || (i > 0 && i < 11)) return null;
+            const jointColor = getScoreColor(formScore);
+            return (
+              <View
+                key={`joint-${i}`}
+                style={{
+                  position: 'absolute',
+                  left: `${lm.x * 100}%`,
+                  top: `${lm.y * 100}%`,
+                  width: 8,
+                  height: 8,
+                  borderRadius: 0, // Square joints for brutalist feel
+                  backgroundColor: COLORS.surface,
+                  borderColor: jointColor,
+                  borderWidth: 2,
+                  transform: [{ translateX: -4 }, { translateY: -4 }],
+                  zIndex: 10,
+                }}
+              />
+            );
+          })}
 
-            <View style={styles.formScoreContainer}>
-              <View style={styles.formScoreCircle}>
-                 <Typography variant="labelSm" style={styles.formLabel}>FORM</Typography>
-                 <View style={styles.scoreValueContainer}>
-                   <Typography variant="displayLg" style={styles.scoreValue}>95</Typography>
-                   <Typography variant="labelSm" style={styles.percentage}>%</Typography>
-                 </View>
-              </View>
-            </View>
-          </View>
+          {/* Connections */}
+          {POSE_CONNECTIONS.map(([startIdx, endIdx], i) => {
+             const start = landmarks[startIdx];
+             const end = landmarks[endIdx];
+             if (!start || !end || start.visibility < 0.5 || end.visibility < 0.5) return null;
 
-          {/* REPS OVERLAY */}
-          <View style={styles.centerOverlay}>
-            <Typography style={styles.repsCount}>12</Typography>
-            <Typography variant="labelSm" style={styles.repsLabel}>REPS</Typography>
-            
-            {/* Visual Skeleton Placeholder (Visual only as requested per design) */}
-            <View style={styles.skeletonLayer}>
-               {/* Simple line skeleton mockup */}
-               <View style={[styles.skeletonLine, { height: 100, transform: [{ rotate: '5deg' }] }]} />
-               <View style={[styles.skeletonLine, { height: 120, left: 20, transform: [{ rotate: '-10deg' }] }]} />
-            </View>
-          </View>
+             const dx = (end.x - start.x) * 100;
+             const dy = (end.y - start.y) * 100;
+             const length = Math.sqrt(dx * dx + dy * dy);
+             const angle = Math.atan2(dy, dx) * (180 / Math.PI);
 
-          {/* FEEDBACK BADGES */}
-          <View style={styles.feedbackContainer}>
-            <View style={styles.feedbackLeft}>
-               <View style={styles.statusBadge}>
-                 <MaterialCommunityIcons name="check-circle" size={18} color="#FFF" />
-                 <Typography variant="labelSm" style={styles.statusText}>GOOD FORM</Typography>
-               </View>
-               <View style={[styles.statusBadge, styles.warningBadge]}>
-                 <MaterialCommunityIcons name="alert" size={18} color="#FFF" />
-                 <Typography variant="labelSm" style={styles.statusText}>GO LOWER</Typography>
-               </View>
-            </View>
-            
-            <View style={styles.alignmentContainer}>
-              <View style={styles.alignmentCircle}>
-                <MaterialCommunityIcons name="account-check" size={32} color="#FFF" />
-                <Typography variant="labelSm" style={styles.alignmentText}>ALIGNED</Typography>
-              </View>
-            </View>
-          </View>
-        </SafeAreaView>
-
-        {/* BOTTOM CONTROLS */}
-        <View style={styles.bottomBar}>
-          <TouchableOpacity style={styles.iconBtn} onPress={toggleCameraFacing}>
-            <MaterialCommunityIcons name="camera-flip" size={24} color="#FFF" />
-          </TouchableOpacity>
-
-          <TouchableOpacity 
-            style={styles.playPauseBtn} 
-            onPress={() => setIsPaused(!isPaused)}
-          >
-            <MaterialCommunityIcons 
-              name={isPaused ? "play" : "pause"} 
-              size={36} 
-              color="#000" 
-            />
-          </TouchableOpacity>
-
-          <TouchableOpacity 
-            style={styles.endSessionBtn}
-            onPress={() => router.push('/')}
-          >
-            <Typography variant="labelLg" style={styles.endSessionText}>END SESSION</Typography>
-          </TouchableOpacity>
-
-          <TouchableOpacity style={styles.iconBtn}>
-            <MaterialCommunityIcons name="volume-high" size={24} color="#FFF" />
-          </TouchableOpacity>
+             return (
+               <View
+                 key={`bone-${i}`}
+                 style={{
+                   position: 'absolute',
+                   left: `${start.x * 100}%`,
+                   top: `${start.y * 100}%`,
+                   width: `${length}%`,
+                   height: 2,
+                   backgroundColor: getScoreColor(formScore),
+                   opacity: 0.5,
+                   transform: [
+                     { translateX: 0 },
+                     { translateY: -1 },
+                     { rotate: `${angle}deg` },
+                   ],
+                   transformOrigin: 'left',
+                 }}
+               />
+             );
+          })}
         </View>
-      </CameraView>
+      )}
+
+      <SafeAreaView style={styles.overlayContainer} edges={['top']}>
+        {/* HEADER */}
+        <View style={styles.header}>
+          <View style={styles.headerLeft}>
+            <View style={styles.logoContainer}>
+              <View style={styles.logoMark} />
+              <Typography variant="headlineLg" style={styles.logo}>FORMCHECK</Typography>
+            </View>
+            <View style={styles.liveBadge}>
+              <View style={styles.livePulse}>
+                <View style={[styles.liveDot, { backgroundColor: COLORS.live, opacity: isPaused ? 0.3 : 1 }]} />
+                {!isPaused && <View style={[styles.livePulseOuter, { backgroundColor: COLORS.liveDim, opacity: isPaused ? 0 : 0.6 }]} />}
+              </View>
+              <Typography variant="labelSm" style={{ color: isPaused ? COLORS.textDisabled : COLORS.live, fontWeight: '700' }}>
+                {isPaused ? 'PAUSED' : 'LIVE'}
+              </Typography>
+            </View>
+          </View>
+          <View style={styles.headerRight}>
+            <Pressable style={styles.plusBtn}>
+              <MaterialCommunityIcons name="plus" size={20} color={COLORS.textMuted} />
+            </Pressable>
+          </View>
+        </View>
+
+        {/* EXERCISE INFO */}
+        <View style={styles.topInfoRow}>
+          <View style={styles.exerciseInfoContainer}>
+            <Typography variant="labelSm" style={styles.labelSmall}>EXERCISE</Typography>
+            <Typography variant="headlineLg" style={styles.exerciseName}>DUMBBELL PRESS</Typography>
+            <View style={styles.timeBadge}>
+              <MaterialCommunityIcons name="clock-outline" size={14} color={COLORS.textMuted} />
+              <Typography variant="labelSm" style={styles.timeValue}>04:12</Typography>
+            </View>
+          </View>
+
+          <View style={styles.formScoreContainer}>
+            <Animated.View style={[
+              styles.formScoreCircle,
+              {
+                transform: [{ scale: scoreAnimation }],
+                borderColor: getScoreColor(formScore),
+              }
+            ]}>
+              <Typography variant="labelSm" style={[styles.formLabel, { color: getScoreColor(formScore) }]}>FORM</Typography>
+              <View style={styles.scoreValueContainer}>
+                <Typography variant="displayLg" style={[styles.scoreValue, { color: getScoreColor(formScore) }]}>{formScore}</Typography>
+                <Typography variant="labelSm" style={[styles.percentage, { color: getScoreColor(formScore) }]}>%</Typography>
+              </View>
+            </Animated.View>
+          </View>
+        </View>
+
+        {/* REPS OVERLAY */}
+        <View style={styles.centerOverlay}>
+          <Animated.View style={{ transform: [{ scale: repsAnimation }] }}>
+            <Typography style={styles.repsCount}>{reps}</Typography>
+          </Animated.View>
+          <Typography variant="labelSm" style={styles.repsLabel}>REPS</Typography>
+        </View>
+
+        {/* FEEDBACK */}
+        <View style={styles.feedbackContainer}>
+          <View style={styles.feedbackLeft}>
+            <View style={[
+              styles.statusBadge,
+              {
+                backgroundColor: isGoodForm ? COLORS.successDim : COLORS.errorDim,
+                borderColor: isGoodForm ? COLORS.successBorder : COLORS.errorBorder,
+              }
+            ]}>
+              <View style={[styles.statusDot, {
+                backgroundColor: isGoodForm ? COLORS.success : COLORS.error,
+              }]} />
+              <Typography variant="labelSm" style={[styles.statusText, {
+                color: isGoodForm ? COLORS.success : COLORS.error,
+              }]}>{isGoodForm ? "GOOD FORM" : "RETRY FORM"}</Typography>
+            </View>
+
+            {feedback && feedback !== 'GOOD FORM' && (
+              <View style={[styles.statusBadge, { backgroundColor: COLORS.errorDim, borderColor: COLORS.errorBorder }]}>
+                <View style={[styles.statusDot, { backgroundColor: COLORS.error }]} />
+                <Typography variant="labelSm" style={[styles.statusText, { color: COLORS.error }]}>{feedback}</Typography>
+              </View>
+            )}
+          </View>
+
+          <View style={styles.alignmentContainer}>
+            <View style={[styles.alignmentBox, {
+              borderColor: isAligned ? COLORS.successBorder : COLORS.borderHigh,
+              backgroundColor: isAligned ? COLORS.successDim : COLORS.surfaceHigh,
+            }]}>
+              <MaterialCommunityIcons name="account-check" size={20} color={isAligned ? COLORS.success : COLORS.textMuted} />
+              <Typography variant="labelSm" style={[styles.alignmentText, {
+                color: isAligned ? COLORS.success : COLORS.textMuted,
+              }]}>{isAligned ? "ALIGNED" : "CENTER"}</Typography>
+            </View>
+          </View>
+        </View>
+      </SafeAreaView>
+
+      {/* BOTTOM CONTROLS */}
+      <View style={styles.bottomBar}>
+        <TouchableOpacity style={styles.iconBtn} onPress={toggleCameraFacing}>
+          <MaterialCommunityIcons name="camera-flip" size={20} color={COLORS.textMuted} />
+        </TouchableOpacity>
+
+        <TouchableOpacity
+          style={styles.playPauseBtn}
+          onPress={() => setIsPaused(!isPaused)}
+        >
+          <MaterialCommunityIcons
+            name={isPaused ? "play" : "pause"}
+            size={24}
+            color={COLORS.surface}
+          />
+        </TouchableOpacity>
+
+        <TouchableOpacity
+          style={styles.endSessionBtn}
+          onPress={() => router.push('/')}
+        >
+          <MaterialCommunityIcons name="stop" size={16} color={COLORS.text} />
+          <Typography variant="labelSm" style={styles.endSessionText}>END</Typography>
+        </TouchableOpacity>
+
+        <TouchableOpacity style={styles.iconBtn}>
+          <MaterialCommunityIcons name="volume-high" size={20} color={COLORS.textMuted} />
+        </TouchableOpacity>
+      </View>
     </View>
   );
 }
 
+import { TouchableOpacity } from 'react-native';
+
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: '#000',
+    backgroundColor: COLORS.surface,
   },
   camera: {
     flex: 1,
   },
-  overlay: {
-    flex: 1,
-    paddingHorizontal: 16,
+  overlayContainer: {
+    ...StyleSheet.absoluteFillObject,
+    paddingHorizontal: 20,
   },
+
+  // Header
   header: {
     flexDirection: 'row',
     justifyContent: 'space-between',
-    alignItems: 'center',
-    paddingVertical: 12,
+    alignItems: 'flex-start',
+    paddingTop: 8,
   },
   headerLeft: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 12,
+    gap: 16,
   },
-  menuIcon: {
-    width: 40,
-    height: 40,
-    borderRadius: 20,
-    backgroundColor: 'rgba(255, 255, 255, 0.1)',
+  logoContainer: {
+    flexDirection: 'row',
     alignItems: 'center',
-    justifyContent: 'center',
+    gap: 10,
+  },
+  logoMark: {
+    width: 3,
+    height: 24,
+    backgroundColor: COLORS.white,
   },
   logo: {
     fontWeight: '700',
-    color: '#FFF',
-  },
-  headerRight: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 12,
+    color: COLORS.white,
+    letterSpacing: -0.5,
   },
   liveBadge: {
     flexDirection: 'row',
     alignItems: 'center',
-    backgroundColor: 'rgba(255, 255, 255, 0.15)',
-    paddingHorizontal: 12,
-    paddingVertical: 4,
-    borderRadius: 16,
-    gap: 6,
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+    borderRadius: 0,
+    gap: 8,
+    backgroundColor: COLORS.liveDim,
+    borderWidth: 0,
+  },
+  livePulse: {
+    position: 'relative',
+    width: 10,
+    height: 10,
+    justifyContent: 'center',
+    alignItems: 'center',
   },
   liveDot: {
     width: 6,
     height: 6,
-    borderRadius: 3,
-    backgroundColor: '#FF4A4A',
+    borderRadius: 0,
+  },
+  livePulseOuter: {
+    position: 'absolute',
+    width: 10,
+    height: 10,
+    borderRadius: 0,
+    opacity: 0.6,
+  },
+  headerRight: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
   },
   plusBtn: {
-    width: 40,
-    height: 40,
-    borderRadius: 20,
-    backgroundColor: 'rgba(255, 255, 255, 0.1)',
+    width: 36,
+    height: 36,
+    backgroundColor: COLORS.surfaceHigh,
     alignItems: 'center',
     justifyContent: 'center',
+    borderWidth: 1,
+    borderColor: COLORS.border,
   },
+
+  // Top Info
   topInfoRow: {
     flexDirection: 'row',
     justifyContent: 'space-between',
-    marginTop: 20,
+    marginTop: 32,
   },
   exerciseInfoContainer: {
     flex: 1,
   },
   labelSmall: {
-    color: 'rgba(255, 255, 255, 0.6)',
-    letterSpacing: 1,
-    marginBottom: 4,
+    color: COLORS.textMuted,
+    letterSpacing: 1.5,
+    marginBottom: 6,
   },
   exerciseName: {
-    color: '#FFF',
+    color: COLORS.white,
     fontWeight: '700',
     fontSize: 28,
+    letterSpacing: -0.5,
   },
   timeBadge: {
     flexDirection: 'row',
     alignItems: 'center',
-    backgroundColor: 'rgba(0, 0, 0, 0.5)',
+    backgroundColor: COLORS.surfaceHigh,
     alignSelf: 'flex-start',
-    paddingHorizontal: 12,
+    paddingHorizontal: 10,
     paddingVertical: 6,
-    borderRadius: 20,
-    gap: 8,
+    borderRadius: 0,
+    gap: 6,
     marginTop: 12,
-  },
-  timeLabel: {
-    color: 'rgba(255, 255, 255, 0.5)',
-    fontWeight: '700',
+    borderWidth: 1,
+    borderColor: COLORS.border,
   },
   timeValue: {
-    color: '#FFF',
+    color: COLORS.text,
     fontWeight: '700',
   },
   formScoreContainer: {
     alignItems: 'center',
+    paddingTop: 8,
   },
   formScoreCircle: {
-    width: 100,
-    height: 100,
-    borderRadius: 50,
-    backgroundColor: 'rgba(255, 255, 255, 0.15)',
-    borderWidth: 1,
-    borderColor: 'rgba(255, 255, 255, 0.2)',
+    width: 96,
+    height: 96,
+    backgroundColor: COLORS.surfaceHigh,
     alignItems: 'center',
     justifyContent: 'center',
+    borderWidth: 2,
   },
   formLabel: {
-    color: 'rgba(255, 255, 255, 0.6)',
-    letterSpacing: 1,
-    fontSize: 10,
+    letterSpacing: 2,
+    fontSize: 9,
     fontWeight: '700',
+    marginBottom: 2,
   },
   scoreValueContainer: {
     flexDirection: 'row',
     alignItems: 'baseline',
+    marginTop: 2,
   },
   scoreValue: {
-    color: '#FFF',
+    color: COLORS.white,
     fontWeight: '700',
+    lineHeight: 36,
   },
   percentage: {
-    color: 'rgba(255, 255, 255, 0.6)',
+    color: COLORS.textMuted,
     fontWeight: '700',
+    marginLeft: 1,
   },
+
+  // Center
   centerOverlay: {
     flex: 1,
     justifyContent: 'center',
     alignItems: 'center',
   },
   repsCount: {
-    fontSize: 120,
+    fontSize: 140,
     fontWeight: '900',
-    color: 'rgba(255, 255, 255, 0.15)',
+    color: COLORS.white,
+    opacity: 0.1,
+    lineHeight: 140,
+    letterSpacing: -4,
   },
   repsLabel: {
-    color: 'rgba(255, 255, 255, 0.3)',
-    letterSpacing: 4,
-    marginTop: -20,
+    color: COLORS.textMuted,
+    letterSpacing: 6,
+    marginTop: -16,
     fontWeight: '700',
   },
-  skeletonLayer: {
-    position: 'absolute',
-    opacity: 0.2,
-  },
-  skeletonLine: {
-    width: 2,
-    backgroundColor: '#FFF',
-    position: 'absolute',
-  },
+
+  // Feedback
   feedbackContainer: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'flex-end',
-    marginBottom: 40,
+    marginBottom: 48,
   },
   feedbackLeft: {
-    gap: 12,
+    gap: 8,
+    flex: 1,
   },
   statusBadge: {
     flexDirection: 'row',
     alignItems: 'center',
-    backgroundColor: 'rgba(255, 255, 255, 0.15)',
-    paddingHorizontal: 16,
-    paddingVertical: 10,
-    borderRadius: 24,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 0,
     gap: 8,
+    borderWidth: 1,
+    alignSelf: 'flex-start',
   },
-  warningBadge: {
-    backgroundColor: 'rgba(255, 255, 255, 0.15)',
+  statusDot: {
+    width: 6,
+    height: 6,
+    borderRadius: 0,
   },
   statusText: {
-    color: '#FFF',
     fontWeight: '700',
     fontSize: 12,
   },
   alignmentContainer: {
-    alignItems: 'center',
+    alignItems: 'flex-end',
   },
-  alignmentCircle: {
-    width: 80,
-    height: 80,
-    borderRadius: 40,
-    backgroundColor: 'rgba(255, 255, 255, 0.15)',
+  alignmentBox: {
+    flexDirection: 'row',
     alignItems: 'center',
-    justifyContent: 'center',
-    gap: 4,
+    gap: 8,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderWidth: 1,
+    borderRadius: 0,
   },
   alignmentText: {
-    color: '#FFF',
-    fontSize: 10,
+    fontSize: 11,
     fontWeight: '700',
   },
+
+  // Bottom Bar
   bottomBar: {
+    position: 'absolute',
+    bottom: 0,
+    left: 0,
+    right: 0,
     flexDirection: 'row',
-    justifyContent: 'space-between',
+    justifyContent: 'center',
     alignItems: 'center',
     paddingHorizontal: 24,
-    paddingBottom: 40,
-    paddingTop: 20,
-    backgroundColor: 'rgba(18, 18, 18, 0.8)',
+    paddingBottom: 36,
+    paddingTop: 16,
+    backgroundColor: COLORS.surface,
+    gap: 24,
+    borderTopWidth: 1,
+    borderTopColor: COLORS.border,
   },
   iconBtn: {
-    width: 48,
-    height: 48,
-    borderRadius: 24,
-    backgroundColor: 'rgba(255, 255, 255, 0.1)',
+    width: 44,
+    height: 44,
     alignItems: 'center',
     justifyContent: 'center',
+    backgroundColor: COLORS.surfaceHigh,
+    borderWidth: 1,
+    borderColor: COLORS.border,
   },
   playPauseBtn: {
-    width: 64,
-    height: 64,
-    borderRadius: 32,
-    backgroundColor: '#FFF',
+    width: 56,
+    height: 56,
     alignItems: 'center',
     justifyContent: 'center',
+    backgroundColor: COLORS.white,
+    borderWidth: 1,
+    borderColor: COLORS.white,
   },
   endSessionBtn: {
-    backgroundColor: 'rgba(255, 255, 255, 0.15)',
-    paddingHorizontal: 24,
-    height: 48,
-    borderRadius: 24,
+    backgroundColor: COLORS.surfaceHigh,
+    paddingHorizontal: 14,
+    height: 40,
     alignItems: 'center',
     justifyContent: 'center',
+    borderWidth: 1,
+    borderColor: COLORS.border,
+    gap: 6,
+    flexDirection: 'row',
   },
   endSessionText: {
-    color: '#FFF',
+    color: COLORS.text,
     fontWeight: '700',
     letterSpacing: 1,
   },

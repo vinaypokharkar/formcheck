@@ -30,7 +30,7 @@ def main():
             timestamp_ms = int((time.time() - start_time) * 1000)
             
             # Run through our pose estimator
-            _, annotated_frame = estimator.process_frame(frame, timestamp_ms)
+            _, annotated_frame, _ = estimator.process_frame(frame, timestamp_ms)
             
             # Display the live output window
             cv2.imshow('Formcheck - Live Feedback', annotated_frame)
